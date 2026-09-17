@@ -6,6 +6,8 @@
 #include "config.h"
 #include "packet.h"
 
+#define NODE_ID  ID_FIELD
+
 // File .cpp tidak dapat prototipe otomatis seperti .ino,
 // jadi setiap fungsi harus dideklarasikan sebelum dipakai.
 void bacaGPS();
@@ -143,7 +145,8 @@ void kirimStatus(StatusPersonel status) {
     kualitas = (millis() - lastFixTime <= GPS_STALE_AGE) ? POS_FIX : POS_STALE;
   }
 
-  String paket = buatPaket(NODE_ID, status, lat, lon, kualitas);
+  // lastHopID = NODE_ID karena paket ini baru dibuat dan belum diteruskan
+  String paket = buatPaketStatus(NODE_ID, NODE_ID, status, lat, lon, kualitas);
 
   LoRa.beginPacket();
   LoRa.print(paket);
@@ -165,12 +168,48 @@ void terimaPaket() {
     return;
   }
 
-  String pesan;
+  int rssi = LoRa.packetRssi();
+
+  String raw;
   while (LoRa.available()) {
-    pesan += (char)LoRa.read();
+    raw += (char)LoRa.read();
   }
 
-  Serial.printf("DITERIMA: %s (RSSI %d dBm)\n", pesan.c_str(), LoRa.packetRssi());
+  Paket p;
+  if (!parsePaket(raw, p)) {
+    Serial.printf("RUSAK  : \"%s\" (RSSI %d)\n", raw.c_str(), rssi);
+    return;
+  }
+
+  if (!nodeDikenal(p.sourceID)) {
+    Serial.printf("ASING  : sourceID %d tidak dikenal (RSSI %d)\n", p.sourceID, rssi);
+    return;
+  }
+
+  // Abaikan gema status sendiri yang dipantulkan relay.
+  if (p.sourceID == NODE_ID) {
+    return;
+  }
+
+#if PAKSA_LEWAT_RELAY
+  if (p.lastHopID != ID_RELAY) {
+    Serial.printf("DITOLAK: paket langsung dari node %d (lastHop %d, RSSI %d)\n",
+                  p.sourceID, p.lastHopID, rssi);
+    return;
+  }
+#endif
+
+  Serial.printf("DITERIMA: dari node %d via node %d, RSSI %d dBm\n",
+                p.sourceID, p.lastHopID, rssi);
+
+  if (p.tipe == TIPE_PESAN) {
+    Serial.printf("  PESAN  \"%s\"\n", p.teks.c_str());
+  } else if (p.tipe == TIPE_STATUS) {
+    Serial.printf("  STATUS %s | %.6f, %.6f | %s\n",
+                  namaStatus(p.status), p.lat, p.lon, namaKualitas(p.kualitas));
+  }
+
+  Serial.println();
 }
 
 // Hanya cetak ke Serial untuk debugging, tidak mengirim paket LoRa.

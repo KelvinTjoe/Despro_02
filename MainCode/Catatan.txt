@@ -1,0 +1,194 @@
+Serial2.begin(baudrate, config, rxPin, txPin)
+
+Serial 8N1 = 8 bit data per character, N no parity, 1 stop bit
+format tandar untuk koneksi UART sederhana.
+
+
+========================================================
+PERHITUNGAN JANGKAUAN (LINK BUDGET)
+========================================================
+
+Parameter acuan: 433 MHz, SF9, BW 125 kHz, CR 4/5, TX 17 dBm
+
+--- Langkah 1: sensitivitas penerima ---
+S = -174 + 10*log10(BW) + NF + SNR_min
+    -174 dBm/Hz = noise floor termal
+    NF      = 6 dB (noise figure SX1278)
+    SNR_min = -12,5 dB untuk SF9
+
+S = -174 + 50,97 + 6 - 12,5 = -129,5 dBm
+Datasheet SX1278 SF9/BW125 = -129 dBm
+
+--- Langkah 2: link budget ---
+Budget = P_tx + G_tx + G_rx - L_kabel - S
+Budget = 17 + 2 + 2 - 1 + 129 = 149 dB
+
+--- Langkah 3: JANGAN pakai free space (FSPL) ---
+FSPL = 20*log10(d_km) + 20*log10(f_MHz) + 32,44
+Hasilnya 1553 km, tidak ada artinya untuk antena rendah.
+
+Alasan: zona Fresnel pertama harus bebas 60%.
+r = 17,32 * sqrt(d_km / (4 * f_GHz))
+r = 29,4 m pada jarak 5 km
+Antena hanya 1,5-3 m di atas tanah, jadi tanah memotong
+zona Fresnel dan kondisi free space tidak pernah tercapai.
+
+--- Langkah 4: model two-ray ground reflection ---
+Cek jarak breakpoint dulu:
+lambda        = 300 / 433 = 0,693 m
+d_breakpoint  = 4*pi*h1*h2 / lambda
+              = 4*pi*1,5*3 / 0,693 = 82 m
+
+Lewat 82 m, path loss naik 40 dB/dekade (bukan 20 dB):
+PL = 40*log10(d_m) - 20*log10(h1) - 20*log10(h2)
+PL = 40*log10(d_m) - 3,52 - 9,54
+PL = 40*log10(d_m) - 13,06
+    h1 = 1,5 m (personel), h2 = 3 m (posko)
+
+--- Langkah 5: hitung jarak ---
+Sisihkan fade margin 15 dB:
+Path loss tersedia = 149 - 15 = 134 dB
+40*log10(d) = 134 + 13,06 = 147,06
+log10(d)    = 3,677
+d           = 4753 m (~4,8 km)
+
+--- Langkah 6: batas kelengkungan bumi ---
+d_horizon = 4,12 * (sqrt(h1) + sqrt(h2))     [h dalam meter]
+d_horizon = 4,12 * (1,22 + 1,73) = 12,2 km
+Plafon mutlak, berapapun daya pancarnya.
+
+--- Langkah 7: koreksi vegetasi ---
+Redaman dedaunan UHF = 0,05-0,15 dB/meter (ITU-R P.833)
+Kanopi lebat: tambahan 20-40 dB
+Contoh dengan 30 dB:
+Path loss tersedia = 149 - 15 - 30 = 104 dB
+40*log10(d) = 117,06  ->  d = 845 m
+
+--- Langkah 8: time on air ---
+T_sym       = 2^SF / BW = 512 / 125000 = 4,096 ms
+T_preamble  = (8 + 4,25) * T_sym = 50,2 ms
+
+n_payload = 8 + ceil((8*PL - 4*SF + 28 + 16*CRC) / (4*(SF-DE))) * (CR+4)
+          = 8 + ceil((8*34 - 36 + 28 + 16) / 36) * 5
+          = 8 + ceil(280/36) * 5 = 8 + 40 = 48 simbol
+T_payload = 48 * 4,096 = 196,6 ms
+
+Time on air = 50,2 + 196,6 = 247 ms
+Bitrate     = SF * (BW / 2^SF) * (4/(4+CR))
+            = 9 * 244,14 * 0,8 = 1758 bps
+
+--- Ringkasan hasil ---
+LOS area terbuka          : 3-5 km
+Perkampungan / NLOS ringan: 1-2 km
+Kanopi hutan lebat        : 0,3-1 km
+
+CATATAN: di rezim 40 dB/dekade, setiap perubahan X dB pada
+budget mengubah jarak dengan faktor 10^(X/40).
+Jadi +6 dB budget = 1,41x jarak, bukan 2x.
+
+
+========================================================
+EFEK PERUBAHAN SETIAP PARAMETER
+========================================================
+
+--- SPREADING FACTOR (SF) ---
+Sekarang: SF9 (-129 dBm, ToA 247 ms)
+
+NAIK (SF10, SF11, SF12):
+  + Sensitivitas lebih baik: -132 / -134,5 / -137 dBm
+  + Jangkauan naik: SF12 = 8 dB lebih baik = 1,58x (~7,5 km)
+  - Time on air melonjak: SF12 ~1,5 detik per paket
+  - Peluang tabrakan paket naik drastis (belum ada CSMA)
+  - Baterai lebih cepat habis (radio menyala lebih lama)
+
+TURUN (SF8, SF7):
+  + Time on air jauh lebih pendek, kanal lebih lega
+  + Baterai lebih hemat
+  - SF7 = 6 dB lebih buruk = jangkauan 0,71x (~3,4 km)
+  Catatan: SF7 adalah default library LoRa kalau
+  setSpreadingFactor() tidak pernah dipanggil.
+
+--- BANDWIDTH (BW) ---
+Sekarang: 125 kHz
+
+NAIK (250, 500 kHz):
+  + Time on air lebih pendek (T_sym = 2^SF/BW)
+  - Sensitivitas turun 3 dB per penggandaan BW
+    (karena suku 10*log10(BW) di rumus sensitivitas)
+  - 250 kHz = -126 dBm, jangkauan jadi 0,84x
+
+TURUN (62,5 kHz):
+  + Sensitivitas naik 3 dB, jangkauan 1,19x
+  - Time on air dua kali lebih lama
+  - Lebih sensitif terhadap pergeseran frekuensi kristal
+
+--- CODING RATE (CR) ---
+Sekarang: 4/5
+
+NAIK (4/6, 4/7, 4/8):
+  + Koreksi error lebih kuat, tahan interferensi
+  - Payload overhead naik, time on air bertambah
+  - Efek ke jangkauan kecil (~1-2 dB), tidak sebanding
+    dengan tambahan waktu udaranya
+
+TURUN: tidak bisa, 4/5 sudah paling rendah.
+
+--- TX POWER ---
+Sekarang: 17 dBm (MELEBIHI batas legal 12,15 dBm EIRP)
+
+NAIK (20 dBm, batas SX1278):
+  + Hanya 3 dB = 1,19x jarak
+  - Perlu duty cycle terbatas, PA bisa panas
+  - Semakin jauh dari kepatuhan regulasi
+
+TURUN (12 dBm untuk kepatuhan):
+  - Kehilangan 5 dB = jangkauan 0,75x (4,8 km -> 3,6 km)
+  + Baterai lebih hemat, PA lebih dingin
+  + Patuh Permen Komdigi No. 2/2025
+  Penalti relatif ringan dibanding manfaat kepatuhan.
+
+--- GAIN ANTENA ---
+Pengungkit TERBESAR, bukan TX power.
+
+Budget per jenis antena:
+  Rubber duck 2 dBi  : 149 dB -> 4,8 km
+  Spring 0 dBi       : 145 dB -> 3,8 km
+  Spring buruk -3 dBi: 139 dB -> 2,7 km
+
+Beda antena bagus vs buruk = 10 dB = 1,78x jarak.
+Lebih besar dampaknya daripada mengubah TX 17->12 dBm.
+Antena directional (Yagi 7 dBi) di posko bisa menambah
+5 dB tanpa menyalahi batas daya pancar, tapi hanya
+mencakup satu arah.
+
+--- KETINGGIAN ANTENA ---
+Pengungkit kedua terbesar, dan paling murah.
+
+Naik dari 3 m ke 10 m di posko:
+  PL = 40*log10(d) - 20*log10(1,5) - 20*log10(10)
+     = 40*log10(d) - 3,52 - 20,0
+  Budget efektif bertambah 10,5 dB = 1,83x jarak
+  Horizon jadi 4,12*(1,22 + 3,16) = 18 km
+
+Naik ke bukit 30 m:
+  Horizon jadi 4,12*(1,22 + 5,48) = 27,6 km
+
+Menaikkan antena jauh lebih efektif daripada
+menaikkan daya pancar.
+
+--- FREKUENSI ---
+Sekarang: 433 MHz (tetap, sudah final)
+
+Kalau pindah ke 915 MHz:
+  - FSPL naik 6,5 dB (20*log10(915/433))
+  - Penetrasi vegetasi lebih buruk
+  + Antena lebih kecil untuk gain yang sama
+  Untuk kanopi hutan, 433 MHz memang pilihan lebih baik.
+
+--- PANJANG PAYLOAD ---
+Sekarang: 34 byte CSV, ToA 247 ms
+
+Tidak mempengaruhi jangkauan sama sekali, hanya
+time on air. Migrasi ke binary struct (~16 byte)
+memotong ToA jadi sekitar 170 ms, artinya peluang
+tabrakan paket turun sekitar 30%.
