@@ -2,24 +2,29 @@
 
 #include <Arduino.h>
 #include "config.h"
+#include "dedup.h"
 
 // ============================================================
 // Format paket CSV:
 //
-//   sourceID,lastHopID,tipe,isi...
+//   sourceID,lastHopID,seq,tipe,isi...
 //
 // sourceID  = node yang MEMBUAT paket, tidak pernah berubah
 // lastHopID = node yang TERAKHIR menyiarkan, diubah tiap kali diteruskan
+// seq       = nomor urut dari pembuat, naik 1 tiap paket BARU. Siaran
+//             ulang / paket yang diteruskan membawa seq yang sama, dan
+//             pasangan (sourceID, seq) itulah yang dipakai penerima
+//             untuk mengenali duplikat.
 // tipe      = STATUS atau PESAN
 // isi       = sisa baris, bentuknya tergantung tipe
 //
 // tipe STATUS -> isi = status,lat,lon,flag
-//   1,1,STATUS,BANTUAN,-6.365432,106.824512,FIX     (asli dari field)
-//   1,2,STATUS,BANTUAN,-6.365432,106.824512,FIX     (setelah relay id 2)
+//   1,1,17,STATUS,BANTUAN,-6.365432,106.824512,FIX   (asli dari field)
+//   1,2,17,STATUS,BANTUAN,-6.365432,106.824512,FIX   (setelah relay id 2)
 //
 // tipe PESAN -> isi = teks bebas
-//   0,0,PESAN,segera kembali ke titik kumpul
-//   0,2,PESAN,segera kembali ke titik kumpul        (setelah relay id 2)
+//   0,0,4,PESAN,segera kembali ke titik kumpul
+//   0,2,4,PESAN,segera kembali ke titik kumpul      (setelah relay id 2)
 //
 // Payload teks sengaja ditaruh PALING AKHIR supaya boleh mengandung
 // koma tanpa merusak pemisahan field.
@@ -48,6 +53,7 @@ enum TipePaket {
 struct Paket {
   uint8_t    sourceID;
   uint8_t    lastHopID;
+  uint16_t   seq;
   TipePaket  tipe;
 
   // terisi hanya kalau tipe == TIPE_STATUS
@@ -82,17 +88,26 @@ inline const char* namaKualitas(KualitasPosisi k) {
 
 // ---------- penyusun paket ----------
 
+inline String buatHeader(uint8_t sourceID, uint8_t lastHopID, uint16_t seq) {
+  String h;
+  h += String(sourceID);
+  h += ',';
+  h += String(lastHopID);
+  h += ',';
+  h += String(seq);
+  h += ',';
+  return h;
+}
+
 inline String buatPaketStatus(uint8_t sourceID,
                               uint8_t lastHopID,
+                              uint16_t seq,
                               StatusPersonel status,
                               float lat,
                               float lon,
                               KualitasPosisi kualitas) {
-  String p;
-  p += String(sourceID);
-  p += ',';
-  p += String(lastHopID);
-  p += ",STATUS,";
+  String p = buatHeader(sourceID, lastHopID, seq);
+  p += "STATUS,";
   p += namaStatus(status);
   p += ',';
   p += String(lat, 6);
@@ -105,12 +120,10 @@ inline String buatPaketStatus(uint8_t sourceID,
 
 inline String buatPaketPesan(uint8_t sourceID,
                              uint8_t lastHopID,
+                             uint16_t seq,
                              const String &teks) {
-  String p;
-  p += String(sourceID);
-  p += ',';
-  p += String(lastHopID);
-  p += ",PESAN,";
+  String p = buatHeader(sourceID, lastHopID, seq);
+  p += "PESAN,";
   p += teks;
   return p;
 }
@@ -121,15 +134,17 @@ inline bool parsePaket(const String &raw, Paket &p) {
   int k1 = raw.indexOf(',');
   int k2 = raw.indexOf(',', k1 + 1);
   int k3 = raw.indexOf(',', k2 + 1);
-  if (k1 < 0 || k2 < 0 || k3 < 0) {
+  int k4 = raw.indexOf(',', k3 + 1);
+  if (k1 < 0 || k2 < 0 || k3 < 0 || k4 < 0) {
     return false;
   }
 
   p.sourceID  = (uint8_t)raw.substring(0, k1).toInt();
   p.lastHopID = (uint8_t)raw.substring(k1 + 1, k2).toInt();
+  p.seq       = (uint16_t)raw.substring(k2 + 1, k3).toInt();
 
-  String tipe = raw.substring(k2 + 1, k3);
-  String isi  = raw.substring(k3 + 1);
+  String tipe = raw.substring(k3 + 1, k4);
+  String isi  = raw.substring(k4 + 1);
 
   if (tipe == "PESAN") {
     p.tipe = TIPE_PESAN;
@@ -188,4 +203,56 @@ inline bool nodeDikenal(uint8_t id) {
     }
   }
   return false;
+}
+
+// ---------- penyaring paket masuk ----------
+//
+// Semua alasan menolak paket dikumpulkan di satu tempat supaya field
+// dan command node tidak punya dua versi aturan yang berbeda.
+// Urutannya penting: pemeriksaan murah dan pasti (asing, gema) dulu,
+// dedup paling akhir karena ia MENCATAT paket ke tabel.
+
+enum HasilSaring {
+  SARING_LOLOS,
+  SARING_ASING,       // sourceID tidak ada di whitelist
+  SARING_GEMA,        // paket buatan node ini sendiri yang kembali
+  SARING_VIA_RELAY,   // sudah diteruskan node lain, ditolak di mode HANYA_LANGSUNG
+  SARING_DUPLIKAT     // (sourceID, seq) sudah pernah diterima
+};
+
+inline const char* namaSaring(HasilSaring h) {
+  switch (h) {
+    case SARING_LOLOS:     return "LOLOS";
+    case SARING_ASING:     return "ASING";
+    case SARING_GEMA:      return "GEMA";
+    case SARING_VIA_RELAY: return "VIA RELAY";
+    case SARING_DUPLIKAT:  return "DUPLIKAT";
+  }
+  return "TIDAKVALID";
+}
+
+inline HasilSaring saringPaket(const Paket &p, uint8_t nodeID) {
+  if (!nodeDikenal(p.sourceID)) {
+    return SARING_ASING;
+  }
+
+  // Anti-loop 1: paket yang kita buat sendiri tidak boleh diproses lagi,
+  // apa pun jalurnya kembali ke kita.
+  if (p.sourceID == nodeID) {
+    return SARING_GEMA;
+  }
+
+#if HANYA_LANGSUNG
+  // Anti-loop 2: lastHopID != sourceID berarti sudah lewat tangan node
+  // lain. Dalam uji dua node ini tidak ada yang boleh meneruskan.
+  if (p.lastHopID != p.sourceID) {
+    return SARING_VIA_RELAY;
+  }
+#endif
+
+  if (sudahPernahDilihat(p.sourceID, p.seq)) {
+    return SARING_DUPLIKAT;
+  }
+
+  return SARING_LOLOS;
 }

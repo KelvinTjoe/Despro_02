@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <LoRa.h>
+#include <esp_system.h>
 
 #include "config.h"
 #include "packet.h"
@@ -10,8 +11,12 @@
 void terimaPaket();
 void bacaInputOperator();
 void kirimPesan(const String &teks);
+void siarkan(const String &paket);
 
 String bufferInput;
+
+// Nomor urut paket berikutnya, lihat penjelasan di LoraFieldNode.cpp.
+uint16_t seqBerikutnya = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -34,15 +39,18 @@ void setup() {
   LoRa.setCodingRate4(LORA_CR);
   LoRa.setTxPower(LORA_TX_POWER);
 
+  seqBerikutnya = (uint16_t)(esp_random() & 0xFFFF);
+
   Serial.println("LoRa: OK");
 
-#if PAKSA_LEWAT_RELAY
-  Serial.printf("MODE UJI: hanya menerima paket via relay (id %d).\n", ID_RELAY);
-  Serial.println("          paket langsung dari field akan DITOLAK.");
-  Serial.println("          ubah PAKSA_LEWAT_RELAY jadi 0 di config.h untuk normal.");
+#if HANYA_LANGSUNG
+  Serial.println("MODE UJI: komunikasi langsung field <-> command saja.");
+  Serial.println("          paket yang sudah diteruskan relay akan DITOLAK.");
+  Serial.println("          ubah HANYA_LANGSUNG jadi 0 di config.h untuk normal.");
 #else
   Serial.println("MODE NORMAL: paket langsung maupun via relay diterima.");
 #endif
+  Serial.printf("Tiap paket disiarkan %d kali (seq mulai %u)\n", ULANG_KIRIM, seqBerikutnya);
 
   Serial.println("Ketik pesan lalu tekan Enter untuk menyiarkan ke lapangan.");
   Serial.println();
@@ -72,28 +80,15 @@ void terimaPaket() {
     return;
   }
 
-  if (!nodeDikenal(p.sourceID)) {
-    Serial.printf("ASING  : sourceID %d tidak dikenal (RSSI %d)\n", p.sourceID, rssi);
+  HasilSaring hasil = saringPaket(p, NODE_ID);
+  if (hasil != SARING_LOLOS) {
+    Serial.printf("%-9s: dari node %d, lastHop %d, seq %u (RSSI %d)\n",
+                  namaSaring(hasil), p.sourceID, p.lastHopID, p.seq, rssi);
     return;
   }
 
-  // Abaikan gema pesan sendiri yang dipantulkan relay.
-  if (p.sourceID == NODE_ID) {
-    return;
-  }
-
-#if PAKSA_LEWAT_RELAY
-  // Mode uji jarak dekat: paksa paket menempuh 2 hop. Paket yang tiba
-  // langsung dari field node ditolak walaupun sinyalnya bagus.
-  if (p.lastHopID != ID_RELAY) {
-    Serial.printf("DITOLAK: paket langsung dari node %d (lastHop %d, RSSI %d)\n",
-                  p.sourceID, p.lastHopID, rssi);
-    return;
-  }
-#endif
-
-  Serial.printf("DITERIMA: dari node %d via node %d, RSSI %d dBm\n",
-                p.sourceID, p.lastHopID, rssi);
+  Serial.printf("DITERIMA: dari node %d, seq %u, RSSI %d dBm\n",
+                p.sourceID, p.seq, rssi);
 
   if (p.tipe == TIPE_STATUS) {
     Serial.printf("  STATUS %s\n", namaStatus(p.status));
@@ -131,11 +126,24 @@ void bacaInputOperator() {
 }
 
 void kirimPesan(const String &teks) {
-  String paket = buatPaketPesan(NODE_ID, NODE_ID, teks);
+  // seq naik SETELAH dipakai, jadi siaran ulang membawa nomor yang sama.
+  String paket = buatPaketPesan(NODE_ID, NODE_ID, seqBerikutnya, teks);
+  seqBerikutnya++;
 
-  LoRa.beginPacket();
-  LoRa.print(paket);
-  LoRa.endPacket();
+  siarkan(paket);
+  Serial.println();
+}
 
-  Serial.printf("TERKIRIM: %s\n\n", paket.c_str());
+// Siarkan paket ULANG_KIRIM kali. delay() di sini boleh karena hanya
+// terjadi saat operator menekan Enter, bukan di jalur penerimaan rutin.
+void siarkan(const String &paket) {
+  for (int i = 0; i < ULANG_KIRIM; i++) {
+    if (i > 0) {
+      delay(JEDA_ULANG_MS);
+    }
+    LoRa.beginPacket();
+    LoRa.print(paket);
+    LoRa.endPacket();
+    Serial.printf("TERKIRIM (%d/%d): %s\n", i + 1, ULANG_KIRIM, paket.c_str());
+  }
 }

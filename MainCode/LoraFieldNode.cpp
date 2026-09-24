@@ -2,6 +2,7 @@
 #include <SPI.h>
 #include <LoRa.h>
 #include <TinyGPSPlus.h>
+#include <esp_system.h>
 
 #include "config.h"
 #include "packet.h"
@@ -15,8 +16,14 @@ void periksaTombol();
 void terimaPaket();
 void laporGPS();
 void kirimStatus(StatusPersonel status);
+void siarkan(const String &paket);
+void kirimOtomatis();
 
 TinyGPSPlus gps;
+
+// Nomor urut paket berikutnya. Dimulai dari angka acak supaya setelah
+// reboot tidak mengulang seq yang mungkin masih diingat penerima.
+uint16_t seqBerikutnya = 0;
 
 // Posisi valid terakhir. Hanya diperbarui saat GPS benar-benar fix,
 // sehingga nilainya tetap terpakai ketika sinyal satelit hilang.
@@ -76,15 +83,45 @@ void setup() {
   LoRa.setCodingRate4(LORA_CR);
   LoRa.setTxPower(LORA_TX_POWER);
 
+  seqBerikutnya = (uint16_t)(esp_random() & 0xFFFF);
+
   Serial.printf("LoRa: OK pada %d MHz, SF%d\n", (int)(LORA_FREQ / 1E6), LORA_SF);
+#if HANYA_LANGSUNG
+  Serial.println("MODE UJI: komunikasi langsung field <-> command, relay diabaikan.");
+#endif
+  Serial.printf("Tiap paket disiarkan %d kali (seq mulai %u)\n", ULANG_KIRIM, seqBerikutnya);
+#if AUTO_KIRIM
+  Serial.printf("SIARAN OTOMATIS: status %s tiap %lu detik (tombol belum terpasang)\n",
+                namaStatus(AUTO_STATUS), AUTO_KIRIM_MS / 1000);
+#endif
   Serial.printf("Tahan salah satu tombol selama %lu detik untuk mengirim status\n", HOLD_DURATION/1000);
 }
 
 void loop() {
   bacaGPS();
   periksaTombol();
+  kirimOtomatis();
   terimaPaket();
   laporGPS();
+}
+
+// Siaran berkala pengganti tombol. Siaran pertama langsung saat boot,
+// supaya tidak perlu menunggu satu periode penuh untuk tahu radio jalan.
+void kirimOtomatis() {
+#if AUTO_KIRIM
+  static unsigned long terakhirKirim = 0;
+  static bool sudahPertama = false;
+  unsigned long now = millis();
+
+  if (sudahPertama && now - terakhirKirim < AUTO_KIRIM_MS) {
+    return;
+  }
+  terakhirKirim = now;
+  sudahPertama = true;
+
+  Serial.println("[OTOMATIS] mengirim status");
+  kirimStatus(AUTO_STATUS);
+#endif
 }
 
 void bacaGPS() {
@@ -145,20 +182,34 @@ void kirimStatus(StatusPersonel status) {
     kualitas = (millis() - lastFixTime <= GPS_STALE_AGE) ? POS_FIX : POS_STALE;
   }
 
-  // lastHopID = NODE_ID karena paket ini baru dibuat dan belum diteruskan
-  String paket = buatPaketStatus(NODE_ID, NODE_ID, status, lat, lon, kualitas);
+  // lastHopID = NODE_ID karena paket ini baru dibuat dan belum diteruskan.
+  // seq naik SETELAH dipakai, jadi siaran ulang di siarkan() memakai
+  // nomor yang sama dan penerima mengenalinya sebagai duplikat.
+  String paket = buatPaketStatus(NODE_ID, NODE_ID, seqBerikutnya, status, lat, lon, kualitas);
+  seqBerikutnya++;
 
-  LoRa.beginPacket();
-  LoRa.print(paket);
-  LoRa.endPacket();
-
-  Serial.printf("TERKIRIM: %s\n", paket.c_str());
+  siarkan(paket);
 
   if (kualitas == POS_NOFIX) {
     Serial.println("  peringatan: GPS belum pernah fix, koordinat dikirim 0,0");
   } else if (kualitas == POS_STALE) {
     Serial.printf("  peringatan: posisi berumur %lu detik\n",
                   (millis() - lastFixTime) / 1000);
+  }
+}
+
+// Siarkan paket ULANG_KIRIM kali. delay() di sini masih bisa diterima
+// karena hanya terjadi sesaat setelah tombol ditahan 2 detik; kalau
+// nanti mengganggu penerimaan, ubah jadi penjadwalan berbasis millis().
+void siarkan(const String &paket) {
+  for (int i = 0; i < ULANG_KIRIM; i++) {
+    if (i > 0) {
+      delay(JEDA_ULANG_MS);
+    }
+    LoRa.beginPacket();
+    LoRa.print(paket);
+    LoRa.endPacket();
+    Serial.printf("TERKIRIM (%d/%d): %s\n", i + 1, ULANG_KIRIM, paket.c_str());
   }
 }
 
@@ -181,26 +232,15 @@ void terimaPaket() {
     return;
   }
 
-  if (!nodeDikenal(p.sourceID)) {
-    Serial.printf("ASING  : sourceID %d tidak dikenal (RSSI %d)\n", p.sourceID, rssi);
+  HasilSaring hasil = saringPaket(p, NODE_ID);
+  if (hasil != SARING_LOLOS) {
+    Serial.printf("%-9s: dari node %d, lastHop %d, seq %u (RSSI %d)\n",
+                  namaSaring(hasil), p.sourceID, p.lastHopID, p.seq, rssi);
     return;
   }
 
-  // Abaikan gema status sendiri yang dipantulkan relay.
-  if (p.sourceID == NODE_ID) {
-    return;
-  }
-
-#if PAKSA_LEWAT_RELAY
-  if (p.lastHopID != ID_RELAY) {
-    Serial.printf("DITOLAK: paket langsung dari node %d (lastHop %d, RSSI %d)\n",
-                  p.sourceID, p.lastHopID, rssi);
-    return;
-  }
-#endif
-
-  Serial.printf("DITERIMA: dari node %d via node %d, RSSI %d dBm\n",
-                p.sourceID, p.lastHopID, rssi);
+  Serial.printf("DITERIMA: dari node %d, seq %u, RSSI %d dBm\n",
+                p.sourceID, p.seq, rssi);
 
   if (p.tipe == TIPE_PESAN) {
     Serial.printf("  PESAN  \"%s\"\n", p.teks.c_str());
