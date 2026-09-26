@@ -7,7 +7,7 @@
 // ============================================================
 // Format paket CSV:
 //
-//   sourceID,lastHopID,seq,tipe,isi...
+//   sourceID,lastHopID,seq,tipe,lat,lon,flag,teks
 //
 // sourceID  = node yang MEMBUAT paket, tidak pernah berubah
 // lastHopID = node yang TERAKHIR menyiarkan, diubah tiap kali diteruskan
@@ -15,28 +15,28 @@
 //             ulang / paket yang diteruskan membawa seq yang sama, dan
 //             pasangan (sourceID, seq) itulah yang dipakai penerima
 //             untuk mengenali duplikat.
-// tipe      = STATUS atau PESAN
-// isi       = sisa baris, bentuknya tergantung tipe
+// tipe      = untuk sekarang selalu PESAN. Kolomnya sengaja
+//             dipertahankan supaya tipe lain bisa ditambahkan nanti
+//             tanpa mengubah susunan field yang sudah ada.
+// lat, lon  = posisi pengirim, 0.000000 kalau tidak punya/belum fix
+// flag      = kualitas posisi: FIX, STALE, atau NOFIX
+// teks      = isi pesan, bentuknya bebas
 //
-// tipe STATUS -> isi = status,lat,lon,flag
-//   1,1,17,STATUS,BANTUAN,-6.365432,106.824512,FIX   (asli dari field)
-//   1,2,17,STATUS,BANTUAN,-6.365432,106.824512,FIX   (setelah relay id 2)
-//
-// tipe PESAN -> isi = teks bebas
-//   0,0,4,PESAN,segera kembali ke titik kumpul
-//   0,2,4,PESAN,segera kembali ke titik kumpul      (setelah relay id 2)
+// Contoh:
+//   1,1,17,PESAN,-6.365432,106.824512,FIX,siaran #17, 7 satelit, FIX
+//   1,2,17,PESAN,-6.365432,106.824512,FIX,siaran #17, 7 satelit, FIX
+//     (baris kedua = paket yang sama setelah diteruskan relay id 2)
+//   0,0,4,PESAN,0.000000,0.000000,NOFIX,segera kembali ke titik kumpul
 //
 // Payload teks sengaja ditaruh PALING AKHIR supaya boleh mengandung
 // koma tanpa merusak pemisahan field.
 //
+// Enum StatusPersonel (AMAN/SIAGA/BANTUAN) untuk sementara DIHAPUS dari
+// paket. Status personel sekarang cuma kata biasa di dalam teks kalau
+// memang perlu dikirim.
+//
 // Ketiga node WAJIB memakai header ini agar urutan field sepakat.
 // ============================================================
-
-enum StatusPersonel {
-  STATUS_AMAN,
-  STATUS_SIAGA,
-  STATUS_BANTUAN
-};
 
 enum KualitasPosisi {
   POS_FIX,    // GPS baru saja memperbarui posisi
@@ -45,7 +45,6 @@ enum KualitasPosisi {
 };
 
 enum TipePaket {
-  TIPE_STATUS,
   TIPE_PESAN,
   TIPE_TIDAKVALID
 };
@@ -56,27 +55,15 @@ struct Paket {
   uint16_t   seq;
   TipePaket  tipe;
 
-  // terisi hanya kalau tipe == TIPE_STATUS
-  StatusPersonel status;
   float          lat;
   float          lon;
   KualitasPosisi kualitas;
 
-  // terisi hanya kalau tipe == TIPE_PESAN
   String teks;
 };
 
 // Fungsi di header harus `inline`, kalau tidak linker akan protes
 // "multiple definition" begitu header ini di-include lebih dari satu .cpp.
-inline const char* namaStatus(StatusPersonel s) {
-  switch (s) {
-    case STATUS_AMAN:    return "AMAN";
-    case STATUS_SIAGA:   return "SIAGA";
-    case STATUS_BANTUAN: return "BANTUAN";
-  }
-  return "TIDAKVALID";
-}
-
 inline const char* namaKualitas(KualitasPosisi k) {
   switch (k) {
     case POS_FIX:   return "FIX";
@@ -99,31 +86,21 @@ inline String buatHeader(uint8_t sourceID, uint8_t lastHopID, uint16_t seq) {
   return h;
 }
 
-inline String buatPaketStatus(uint8_t sourceID,
-                              uint8_t lastHopID,
-                              uint16_t seq,
-                              StatusPersonel status,
-                              float lat,
-                              float lon,
-                              KualitasPosisi kualitas) {
+inline String buatPaketPesan(uint8_t sourceID,
+                             uint8_t lastHopID,
+                             uint16_t seq,
+                             float lat,
+                             float lon,
+                             KualitasPosisi kualitas,
+                             const String &teks) {
   String p = buatHeader(sourceID, lastHopID, seq);
-  p += "STATUS,";
-  p += namaStatus(status);
-  p += ',';
+  p += "PESAN,";
   p += String(lat, 6);
   p += ',';
   p += String(lon, 6);
   p += ',';
   p += namaKualitas(kualitas);
-  return p;
-}
-
-inline String buatPaketPesan(uint8_t sourceID,
-                             uint8_t lastHopID,
-                             uint16_t seq,
-                             const String &teks) {
-  String p = buatHeader(sourceID, lastHopID, seq);
-  p += "PESAN,";
+  p += ',';
   p += teks;
   return p;
 }
@@ -146,18 +123,12 @@ inline bool parsePaket(const String &raw, Paket &p) {
   String tipe = raw.substring(k3 + 1, k4);
   String isi  = raw.substring(k4 + 1);
 
-  if (tipe == "PESAN") {
-    p.tipe = TIPE_PESAN;
-    p.teks = isi;
-    return true;
-  }
-
-  if (tipe != "STATUS") {
+  if (tipe != "PESAN") {
     p.tipe = TIPE_TIDAKVALID;
     return false;
   }
 
-  // isi = status,lat,lon,flag
+  // isi = lat,lon,flag,teks
   int m1 = isi.indexOf(',');
   int m2 = isi.indexOf(',', m1 + 1);
   int m3 = isi.indexOf(',', m2 + 1);
@@ -166,21 +137,18 @@ inline bool parsePaket(const String &raw, Paket &p) {
     return false;
   }
 
-  String s = isi.substring(0, m1);
-  if      (s == "AMAN")    p.status = STATUS_AMAN;
-  else if (s == "SIAGA")   p.status = STATUS_SIAGA;
-  else if (s == "BANTUAN") p.status = STATUS_BANTUAN;
-  else { p.tipe = TIPE_TIDAKVALID; return false; }
+  p.lat = isi.substring(0, m1).toFloat();
+  p.lon = isi.substring(m1 + 1, m2).toFloat();
 
-  p.lat = isi.substring(m1 + 1, m2).toFloat();
-  p.lon = isi.substring(m2 + 1, m3).toFloat();
-
-  String f = isi.substring(m3 + 1);
+  String f = isi.substring(m2 + 1, m3);
   if      (f == "FIX")   p.kualitas = POS_FIX;
   else if (f == "STALE") p.kualitas = POS_STALE;
   else                   p.kualitas = POS_NOFIX;
 
-  p.tipe = TIPE_STATUS;
+  // Sisa baris apa adanya, termasuk koma yang ada di dalamnya.
+  p.teks = isi.substring(m3 + 1);
+
+  p.tipe = TIPE_PESAN;
   return true;
 }
 
@@ -216,7 +184,8 @@ enum HasilSaring {
   SARING_LOLOS,
   SARING_ASING,       // sourceID tidak ada di whitelist
   SARING_GEMA,        // paket buatan node ini sendiri yang kembali
-  SARING_VIA_RELAY,   // sudah diteruskan node lain, ditolak di mode HANYA_LANGSUNG
+  SARING_VIA_RELAY,   // sudah diteruskan relay, ditolak di JALUR_LANGSUNG
+  SARING_LANGSUNG,    // belum lewat relay, ditolak di JALUR_WAJIB_RELAY
   SARING_DUPLIKAT     // (sourceID, seq) sudah pernah diterima
 };
 
@@ -226,6 +195,7 @@ inline const char* namaSaring(HasilSaring h) {
     case SARING_ASING:     return "ASING";
     case SARING_GEMA:      return "GEMA";
     case SARING_VIA_RELAY: return "VIA RELAY";
+    case SARING_LANGSUNG:  return "LANGSUNG";
     case SARING_DUPLIKAT:  return "DUPLIKAT";
   }
   return "TIDAKVALID";
@@ -242,11 +212,21 @@ inline HasilSaring saringPaket(const Paket &p, uint8_t nodeID) {
     return SARING_GEMA;
   }
 
-#if HANYA_LANGSUNG
-  // Anti-loop 2: lastHopID != sourceID berarti sudah lewat tangan node
-  // lain. Dalam uji dua node ini tidak ada yang boleh meneruskan.
+  // Aturan jalur. Letaknya WAJIB sebelum dedup di bawah, karena dedup
+  // mencatat (sourceID, seq) ke tabel. Dalam JALUR_WAJIB_RELAY, salinan
+  // langsung dan salinan dari relay membawa seq yang sama; kalau yang
+  // langsung sempat tercatat lebih dulu, salinan dari relay akan dibuang
+  // sebagai DUPLIKAT dan jalur relay mati total.
+#if MODE_JALUR == JALUR_LANGSUNG
+  // lastHopID != sourceID berarti sudah lewat tangan node lain.
   if (p.lastHopID != p.sourceID) {
     return SARING_VIA_RELAY;
+  }
+#elif MODE_JALUR == JALUR_WAJIB_RELAY
+  // Kebalikannya: paket yang belum diteruskan siapa pun ditolak, supaya
+  // field dan command terbukti tidak bicara langsung.
+  if (p.lastHopID == p.sourceID) {
+    return SARING_LANGSUNG;
   }
 #endif
 

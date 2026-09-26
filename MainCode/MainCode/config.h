@@ -39,6 +39,13 @@
 #define BUTTON_BANTUAN  33
 #define BUTTON_SIAGA    25
 
+// Tombol untuk sementara DINONAKTIFKAN: pemicu kirim sekarang murni
+// periodik. Seluruh kode tombol masih utuh di LoraFieldNode.cpp,
+// dipagari #if TOMBOL_AKTIF, jadi cukup ubah ke 1 untuk menghidupkannya
+// kembali. Saat aktif, tiap tombol mengirim namanya sebagai teks biasa
+// karena enum StatusPersonel sudah tidak ada di paket.
+#define TOMBOL_AKTIF    0
+
 // ---- Identitas node ----
 // NODE_ID tidak didefinisikan di sini, tapi di masing-masing file node,
 // supaya satu config.h bisa dipakai ketiganya tanpa saling menimpa.
@@ -46,18 +53,33 @@
 #define ID_FIELD        1
 #define ID_RELAY        2
 
-// ---- Penanda mode pengujian ----
-// 1 = uji komponen field <-> command SAJA. Relay dianggap tidak ada:
-//     ID relay dikeluarkan dari whitelist, dan paket yang lastHopID-nya
-//     bukan pembuatnya sendiri (artinya sudah diteruskan node lain)
-//     DITOLAK. Kedua node juga tidak pernah meneruskan paket apa pun,
-//     jadi tidak mungkin terbentuk loop.
-// 0 = operasi normal, paket via relay ikut diterima.
-#define HANYA_LANGSUNG  1
+// ---- Pemilihan jalur ----
+// Menentukan paket mana yang boleh diproses penerima. Penandanya ada di
+// dalam paket itu sendiri: lastHopID == sourceID berarti paket datang
+// langsung dari pembuatnya dan belum disentuh siapa pun, sedangkan
+// lastHopID != sourceID berarti sudah diteruskan relay.
+//
+//   JALUR_LANGSUNG    = hanya paket langsung. Untuk uji dua node;
+//                       hasil terusan relay dibuang.
+//   JALUR_BEBAS       = operasi normal. Paket langsung maupun via relay
+//                       sama-sama diterima, mana saja yang sampai duluan.
+//   JALUR_WAJIB_RELAY = kebalikan JALUR_LANGSUNG. Paket langsung dibuang,
+//                       hanya yang sudah lewat relay yang diproses, jadi
+//                       field dan command tidak bisa bicara berduaan.
+//                       Untuk membuktikan topologi tiga node benar-benar
+//                       jalan. Kalau relay mati, komunikasi berhenti
+//                       total walau kedua node bersebelahan.
+#define JALUR_LANGSUNG     0
+#define JALUR_BEBAS        1
+#define JALUR_WAJIB_RELAY  2
+
+#define MODE_JALUR      JALUR_WAJIB_RELAY
 
 // Whitelist: paket dari sourceID di luar daftar ini diabaikan,
 // untuk menolak gangguan dari radio 433 MHz lain di sekitar.
-#if HANYA_LANGSUNG
+// Yang disaring di sini PEMBUAT paket, bukan penerusnya, dan relay tidak
+// pernah menjadi sourceID karena ia hanya mengubah lastHopID.
+#if MODE_JALUR == JALUR_LANGSUNG
   #define NODE_DIKENAL  { ID_COMMAND, ID_FIELD }
 #else
   #define NODE_DIKENAL  { ID_COMMAND, ID_FIELD, ID_RELAY }
@@ -79,14 +101,12 @@
 #define DEDUP_UMUR_MS   60000UL
 
 // ---- Siaran otomatis field node ----
-// Selama tombol belum terpasang secara fisik, field node menyiarkan
-// status sendiri tiap AUTO_KIRIM_MS supaya jalur ke command node tetap
-// bisa diuji. Set AUTO_KIRIM ke 0 begitu tombol sudah ada.
-// Pin tombol memakai INPUT_PULLUP, jadi tanpa tombol terpasang bacaannya
-// HIGH (tidak ditekan) dan kode tombol aman dibiarkan aktif.
+// Pemicu kirim field node saat ini: periodik tiap AUTO_KIRIM_MS, tanpa
+// campur tangan tombol. Teks yang dibawa berisi nomor siaran, jumlah
+// satelit, dan status fix GPS, supaya paket yang hilang di penerima
+// langsung kelihatan dari lompatan nomornya.
 #define AUTO_KIRIM      1
 #define AUTO_KIRIM_MS   10000UL
-#define AUTO_STATUS     STATUS_AMAN
 
 // ---- Parameter waktu (ms) ----
 #define HOLD_DURATION   2000UL

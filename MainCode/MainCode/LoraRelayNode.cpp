@@ -12,6 +12,7 @@ void tampilkanPaket(const Paket &p, int rssi);
 
 unsigned long jumlahDiteruskan = 0;
 unsigned long jumlahDitolak = 0;
+unsigned long jumlahDuplikat = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -82,6 +83,25 @@ void terimaDanTeruskan() {
 
   tampilkanPaket(p, rssi);
 
+  // Anti-duplikasi relay. Pembuat paket menyiarkan tiap paket
+  // ULANG_KIRIM kali dengan seq yang sama, dan relay menerima semuanya
+  // sebagai kejadian terpisah. Tanpa penyaring ini setiap salinan ikut
+  // diteruskan, sehingga satu kejadian berlipat jadi banyak transmisi
+  // di udara.
+  //
+  // Salinan kedua tetap DILAPORKAN di atas lewat tampilkanPaket(), jadi
+  // terlihat jelas bahwa siaran ulang sumber benar-benar sampai dengan
+  // baik. Yang tidak dilakukan hanyalah meneruskannya.
+  if (sudahPernahDilihat(p.sourceID, p.seq)) {
+    jumlahDuplikat++;
+    Serial.printf("  DUPLIKAT: salinan ini DITERIMA dengan baik (RSSI %d), "
+                  "tapi TIDAK diteruskan\n", rssi);
+    Serial.printf("            seq %u sudah diteruskan sebelumnya, "
+                  "cukup satu yang diteruskan (total duplikat %lu)\n\n",
+                  p.seq, jumlahDuplikat);
+    return;
+  }
+
   // Jeda acak sebelum menyiarkan ulang. Kalau nanti ada dua relay yang
   // menerima paket yang sama bersamaan, tanpa jeda ini keduanya akan
   // menyiarkan di saat yang sama dan saling menghancurkan.
@@ -100,13 +120,9 @@ void terimaDanTeruskan() {
 }
 
 void tampilkanPaket(const Paket &p, int rssi) {
-  Serial.printf("DITERIMA: dari node %d, lastHop %d, RSSI %d dBm\n",
-                p.sourceID, p.lastHopID, rssi);
-
-  if (p.tipe == TIPE_STATUS) {
-    Serial.printf("  STATUS %s | %.6f, %.6f | %s\n",
-                  namaStatus(p.status), p.lat, p.lon, namaKualitas(p.kualitas));
-  } else if (p.tipe == TIPE_PESAN) {
-    Serial.printf("  PESAN  \"%s\"\n", p.teks.c_str());
-  }
+  Serial.printf("DITERIMA: dari node %d, lastHop %d, seq %u, RSSI %d dBm\n",
+                p.sourceID, p.lastHopID, p.seq, rssi);
+  Serial.printf("  POSISI %.6f, %.6f (%s)\n",
+                p.lat, p.lon, namaKualitas(p.kualitas));
+  Serial.printf("  PESAN  \"%s\"\n", p.teks.c_str());
 }

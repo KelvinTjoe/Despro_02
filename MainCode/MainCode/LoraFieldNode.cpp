@@ -12,18 +12,27 @@
 // File .cpp tidak dapat prototipe otomatis seperti .ino,
 // jadi setiap fungsi harus dideklarasikan sebelum dipakai.
 void bacaGPS();
-void periksaTombol();
 void terimaPaket();
 void laporGPS();
-void kirimStatus(StatusPersonel status);
+void kirimPesan(const String &teks);
 void siarkan(const String &paket);
-void kirimOtomatis();
+void kirimPeriodik();
+KualitasPosisi kualitasSekarang();
+
+#if TOMBOL_AKTIF
+void periksaTombol();
+#endif
 
 TinyGPSPlus gps;
 
 // Nomor urut paket berikutnya. Dimulai dari angka acak supaya setelah
 // reboot tidak mengulang seq yang mungkin masih diingat penerima.
 uint16_t seqBerikutnya = 0;
+
+// Nomor siaran periodik, dimulai dari 1 dan ikut dicetak di dalam teks.
+// Berbeda dari seq: yang ini dibaca manusia dan selalu mulai dari awal
+// tiap boot, jadi lompatan angkanya langsung terlihat di command node.
+unsigned long nomorSiaran = 0;
 
 // Posisi valid terakhir. Hanya diperbarui saat GPS benar-benar fix,
 // sehingga nilainya tetap terpakai ketika sinyal satelit hilang.
@@ -32,23 +41,28 @@ float lastLon = 0.0f;
 unsigned long lastFixTime = 0;
 bool pernahFix = false;
 
+#if TOMBOL_AKTIF
+// Tombol tidak lagi mengirim enum status, karena StatusPersonel sudah
+// dikeluarkan dari paket. Yang dikirim sekarang cuma labelnya sebagai
+// teks biasa.
 struct Tombol {
-  uint8_t pin;
-  StatusPersonel status;
-  bool bacaanMentah;
-  bool bacaanStabil;
+  uint8_t     pin;
+  const char *label;
+  bool        bacaanMentah;
+  bool        bacaanStabil;
   unsigned long waktuBerubah;
   unsigned long mulaiTahan;
-  bool sudahKirim;
+  bool        sudahKirim;
 };
 
 Tombol tombol[] = {
-  { BUTTON_AMAN,    STATUS_AMAN,    false, false, 0, 0, false },
-  { BUTTON_SIAGA,   STATUS_SIAGA,   false, false, 0, 0, false },
-  { BUTTON_BANTUAN, STATUS_BANTUAN, false, false, 0, 0, false },
+  { BUTTON_AMAN,    "AMAN",    false, false, 0, 0, false },
+  { BUTTON_SIAGA,   "SIAGA",   false, false, 0, 0, false },
+  { BUTTON_BANTUAN, "BANTUAN", false, false, 0, 0, false },
 };
 
 const int JUMLAH_TOMBOL = sizeof(tombol) / sizeof(tombol[0]);
+#endif
 
 void setup() {
   Serial.begin(115200);
@@ -56,9 +70,11 @@ void setup() {
   Serial.println();
   Serial.printf("=== Field Node %d ===\n", NODE_ID);
 
+#if TOMBOL_AKTIF
   for (int i = 0; i < JUMLAH_TOMBOL; i++) {
     pinMode(tombol[i].pin, INPUT_PULLUP);
   }
+#endif
 
   //inisialisasi GPS NEO-6M di UART2, pin RX/TX sesuai config.h
   //cold start minimum 30 detik
@@ -68,14 +84,14 @@ void setup() {
   SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_SS);
   LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
 
-  //jika lora gagal init, loop di sini selamanya 
+  //jika lora gagal init, loop di sini selamanya
   //daripada menampilakn pesan error terus menerus
   if (!LoRa.begin(LORA_FREQ)) {
     Serial.println("LoRa: init GAGAL, cek wiring SPI dan catu daya modul");
     while (1) {
       delay(1000);
     }
-  } 
+  }
 
   //inisialisasi parameter radio LoRa, set parameter sesuai config.h
   LoRa.setSpreadingFactor(LORA_SF);
@@ -86,28 +102,38 @@ void setup() {
   seqBerikutnya = (uint16_t)(esp_random() & 0xFFFF);
 
   Serial.printf("LoRa: OK pada %d MHz, SF%d\n", (int)(LORA_FREQ / 1E6), LORA_SF);
-#if HANYA_LANGSUNG
-  Serial.println("MODE UJI: komunikasi langsung field <-> command, relay diabaikan.");
+#if MODE_JALUR == JALUR_LANGSUNG
+  Serial.println("JALUR: LANGSUNG, paket hasil terusan relay DITOLAK.");
+#elif MODE_JALUR == JALUR_BEBAS
+  Serial.println("JALUR: BEBAS, paket langsung maupun via relay diterima.");
+#else
+  Serial.println("JALUR: WAJIB RELAY, paket langsung dari command DITOLAK.");
+  Serial.println("       kalau relay mati, tidak ada paket yang masuk.");
 #endif
   Serial.printf("Tiap paket disiarkan %d kali (seq mulai %u)\n", ULANG_KIRIM, seqBerikutnya);
 #if AUTO_KIRIM
-  Serial.printf("SIARAN OTOMATIS: status %s tiap %lu detik (tombol belum terpasang)\n",
-                namaStatus(AUTO_STATUS), AUTO_KIRIM_MS / 1000);
+  Serial.printf("SIARAN PERIODIK: tiap %lu detik\n", AUTO_KIRIM_MS / 1000);
 #endif
-  Serial.printf("Tahan salah satu tombol selama %lu detik untuk mengirim status\n", HOLD_DURATION/1000);
+#if TOMBOL_AKTIF
+  Serial.printf("Tahan salah satu tombol selama %lu detik untuk mengirim\n", HOLD_DURATION/1000);
+#else
+  Serial.println("Tombol dinonaktifkan (TOMBOL_AKTIF 0 di config.h)");
+#endif
 }
 
 void loop() {
   bacaGPS();
+#if TOMBOL_AKTIF
   periksaTombol();
-  kirimOtomatis();
+#endif
+  kirimPeriodik();
   terimaPaket();
   laporGPS();
 }
 
-// Siaran berkala pengganti tombol. Siaran pertama langsung saat boot,
-// supaya tidak perlu menunggu satu periode penuh untuk tahu radio jalan.
-void kirimOtomatis() {
+// Siaran berkala. Siaran pertama langsung saat boot, supaya tidak perlu
+// menunggu satu periode penuh untuk tahu radio jalan.
+void kirimPeriodik() {
 #if AUTO_KIRIM
   static unsigned long terakhirKirim = 0;
   static bool sudahPertama = false;
@@ -119,8 +145,19 @@ void kirimOtomatis() {
   terakhirKirim = now;
   sudahPertama = true;
 
-  Serial.println("[OTOMATIS] mengirim status");
-  kirimStatus(AUTO_STATUS);
+  nomorSiaran++;
+
+  // Teks dibuat supaya satu baris di command node sudah cukup untuk
+  // menilai kondisi field node: paket ke berapa, berapa satelit yang
+  // terlihat, dan apakah koordinatnya benar-benar fix.
+  String teks = "siaran #";
+  teks += String(nomorSiaran);
+  teks += ", ";
+  teks += String(gps.satellites.isValid() ? gps.satellites.value() : 0);
+  teks += " satelit, ";
+  teks += namaKualitas(kualitasSekarang());
+
+  kirimPesan(teks);
 #endif
 }
 
@@ -137,6 +174,7 @@ void bacaGPS() {
   }
 }
 
+#if TOMBOL_AKTIF
 void periksaTombol() {
   unsigned long now = millis();
 
@@ -158,34 +196,39 @@ void periksaTombol() {
       if (mentah) {
         t.mulaiTahan = now;
         t.sudahKirim = false;
-        Serial.printf("[%s] mulai ditahan...\n", namaStatus(t.status));
+        Serial.printf("[%s] mulai ditahan...\n", t.label);
       } else if (!t.sudahKirim) {
-        Serial.printf("[%s] dilepas terlalu cepat, dibatalkan\n", namaStatus(t.status));
+        Serial.printf("[%s] dilepas terlalu cepat, dibatalkan\n", t.label);
       }
     }
 
     if (t.bacaanStabil && !t.sudahKirim && now - t.mulaiTahan >= HOLD_DURATION) {
-      kirimStatus(t.status);
+      kirimPesan(String(t.label));
       t.sudahKirim = true;
     }
   }
 }
+#endif
 
-void kirimStatus(StatusPersonel status) {
-  float lat = 0.0f;
-  float lon = 0.0f;
-  KualitasPosisi kualitas = POS_NOFIX;
-
-  if (pernahFix) {
-    lat = lastLat;
-    lon = lastLon;
-    kualitas = (millis() - lastFixTime <= GPS_STALE_AGE) ? POS_FIX : POS_STALE;
+// Kualitas posisi saat ini, dipakai baik untuk field paket maupun
+// untuk teksnya, supaya keduanya tidak mungkin berbeda.
+KualitasPosisi kualitasSekarang() {
+  if (!pernahFix) {
+    return POS_NOFIX;
   }
+  return (millis() - lastFixTime <= GPS_STALE_AGE) ? POS_FIX : POS_STALE;
+}
+
+void kirimPesan(const String &teks) {
+  KualitasPosisi kualitas = kualitasSekarang();
+  float lat = (kualitas == POS_NOFIX) ? 0.0f : lastLat;
+  float lon = (kualitas == POS_NOFIX) ? 0.0f : lastLon;
 
   // lastHopID = NODE_ID karena paket ini baru dibuat dan belum diteruskan.
   // seq naik SETELAH dipakai, jadi siaran ulang di siarkan() memakai
   // nomor yang sama dan penerima mengenalinya sebagai duplikat.
-  String paket = buatPaketStatus(NODE_ID, NODE_ID, seqBerikutnya, status, lat, lon, kualitas);
+  String paket = buatPaketPesan(NODE_ID, NODE_ID, seqBerikutnya,
+                                lat, lon, kualitas, teks);
   seqBerikutnya++;
 
   siarkan(paket);
@@ -199,8 +242,8 @@ void kirimStatus(StatusPersonel status) {
 }
 
 // Siarkan paket ULANG_KIRIM kali. delay() di sini masih bisa diterima
-// karena hanya terjadi sesaat setelah tombol ditahan 2 detik; kalau
-// nanti mengganggu penerimaan, ubah jadi penjadwalan berbasis millis().
+// karena hanya terjadi sesaat saat giliran kirim; kalau nanti mengganggu
+// penerimaan, ubah jadi penjadwalan berbasis millis().
 void siarkan(const String &paket) {
   for (int i = 0; i < ULANG_KIRIM; i++) {
     if (i > 0) {
@@ -241,14 +284,9 @@ void terimaPaket() {
 
   Serial.printf("DITERIMA: dari node %d, seq %u, RSSI %d dBm\n",
                 p.sourceID, p.seq, rssi);
-
-  if (p.tipe == TIPE_PESAN) {
-    Serial.printf("  PESAN  \"%s\"\n", p.teks.c_str());
-  } else if (p.tipe == TIPE_STATUS) {
-    Serial.printf("  STATUS %s | %.6f, %.6f | %s\n",
-                  namaStatus(p.status), p.lat, p.lon, namaKualitas(p.kualitas));
-  }
-
+  Serial.printf("  POSISI %.6f, %.6f (%s)\n",
+                p.lat, p.lon, namaKualitas(p.kualitas));
+  Serial.printf("  PESAN  \"%s\"\n", p.teks.c_str());
   Serial.println();
 }
 
@@ -263,11 +301,14 @@ void laporGPS() {
   terakhirLapor = now;
 
   if (!pernahFix) {
-    Serial.printf("GPS: belum fix (%d satelit terlihat)\n", gps.satellites.value());
+    Serial.printf("GPS: belum fix (%lu satelit terlihat, %lu karakter NMEA)\n",
+                  gps.satellites.isValid() ? gps.satellites.value() : 0,
+                  gps.charsProcessed());
     return;
   }
 
-  Serial.printf("GPS: %.6f, %.6f | %d satelit | umur %lu detik\n",
-                lastLat, lastLon, gps.satellites.value(),
+  Serial.printf("GPS: %.6f, %.6f | %lu satelit | umur %lu detik\n",
+                lastLat, lastLon,
+                gps.satellites.isValid() ? gps.satellites.value() : 0,
                 (now - lastFixTime) / 1000);
 }

@@ -43,12 +43,16 @@ void setup() {
 
   Serial.println("LoRa: OK");
 
-#if HANYA_LANGSUNG
-  Serial.println("MODE UJI: komunikasi langsung field <-> command saja.");
-  Serial.println("          paket yang sudah diteruskan relay akan DITOLAK.");
-  Serial.println("          ubah HANYA_LANGSUNG jadi 0 di config.h untuk normal.");
+#if MODE_JALUR == JALUR_LANGSUNG
+  Serial.println("JALUR: LANGSUNG, hanya field <-> command tanpa perantara.");
+  Serial.println("       paket yang sudah diteruskan relay akan DITOLAK.");
+  Serial.println("       ubah MODE_JALUR di config.h untuk mode lain.");
+#elif MODE_JALUR == JALUR_BEBAS
+  Serial.println("JALUR: BEBAS, paket langsung maupun via relay diterima.");
 #else
-  Serial.println("MODE NORMAL: paket langsung maupun via relay diterima.");
+  Serial.println("JALUR: WAJIB RELAY, paket langsung dari field DITOLAK.");
+  Serial.println("       semua paket harus lewat relay dulu. Kalau relay");
+  Serial.println("       mati, komunikasi berhenti total.");
 #endif
   Serial.printf("Tiap paket disiarkan %d kali (seq mulai %u)\n", ULANG_KIRIM, seqBerikutnya);
 
@@ -89,20 +93,16 @@ void terimaPaket() {
 
   Serial.printf("DITERIMA: dari node %d, seq %u, RSSI %d dBm\n",
                 p.sourceID, p.seq, rssi);
+  Serial.printf("  POSISI %.6f, %.6f (%s)\n",
+                p.lat, p.lon, namaKualitas(p.kualitas));
 
-  if (p.tipe == TIPE_STATUS) {
-    Serial.printf("  STATUS %s\n", namaStatus(p.status));
-    Serial.printf("  POSISI %.6f, %.6f (%s)\n",
-                  p.lat, p.lon, namaKualitas(p.kualitas));
-    if (p.kualitas == POS_NOFIX) {
-      Serial.println("  perhatian: personel belum dapat fix GPS");
-    } else if (p.kualitas == POS_STALE) {
-      Serial.println("  perhatian: posisi sudah lama tidak diperbarui");
-    }
-  } else if (p.tipe == TIPE_PESAN) {
-    Serial.printf("  PESAN  \"%s\"\n", p.teks.c_str());
+  if (p.kualitas == POS_NOFIX) {
+    Serial.println("  perhatian: pengirim belum dapat fix GPS");
+  } else if (p.kualitas == POS_STALE) {
+    Serial.println("  perhatian: posisi sudah lama tidak diperbarui");
   }
 
+  Serial.printf("  PESAN  \"%s\"\n", p.teks.c_str());
   Serial.println();
 }
 
@@ -126,8 +126,12 @@ void bacaInputOperator() {
 }
 
 void kirimPesan(const String &teks) {
+  // Command node tidak punya GPS: koordinat selalu 0,0 dan kualitasnya
+  // NOFIX. Kolomnya tetap diisi supaya format paket kedua node sama
+  // persis dan parsernya cuma satu.
   // seq naik SETELAH dipakai, jadi siaran ulang membawa nomor yang sama.
-  String paket = buatPaketPesan(NODE_ID, NODE_ID, seqBerikutnya, teks);
+  String paket = buatPaketPesan(NODE_ID, NODE_ID, seqBerikutnya,
+                                0.0f, 0.0f, POS_NOFIX, teks);
   seqBerikutnya++;
 
   siarkan(paket);
