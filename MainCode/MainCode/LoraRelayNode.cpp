@@ -8,7 +8,7 @@
 #define NODE_ID  ID_RELAY
 
 void terimaDanTeruskan();
-void tampilkanPaket(const Paket &p, int rssi);
+void tampilkanPaket(const Paket &p, int rssi, float snr);
 
 unsigned long jumlahDiteruskan = 0;
 unsigned long jumlahDitolak = 0;
@@ -51,7 +51,10 @@ void terimaDanTeruskan() {
     return;
   }
 
-  int rssi = LoRa.packetRssi();
+  // Diambil sebelum parsePacket() berikutnya menimpanya. Keduanya ikut
+  // ditulis ke paket terusan sebagai kualitas hop pertama.
+  int   rssi = LoRa.packetRssi();
+  float snr  = LoRa.packetSnr();
 
   String raw;
   while (LoRa.available()) {
@@ -81,7 +84,7 @@ void terimaDanTeruskan() {
     return;
   }
 
-  tampilkanPaket(p, rssi);
+  tampilkanPaket(p, rssi, snr);
 
   // Anti-duplikasi relay. Pembuat paket menyiarkan tiap paket
   // ULANG_KIRIM kali dengan seq yang sama, dan relay menerima semuanya
@@ -108,7 +111,7 @@ void terimaDanTeruskan() {
   unsigned long jeda = random(BACKOFF_MIN_MS, BACKOFF_MAX_MS);
   delay(jeda);
 
-  String diteruskan = gantiLastHop(raw, NODE_ID);
+  String diteruskan = buatPaketTerusan(raw, p, NODE_ID, rssi, snr);
 
   LoRa.beginPacket();
   LoRa.print(diteruskan);
@@ -119,9 +122,9 @@ void terimaDanTeruskan() {
                 diteruskan.c_str(), jeda, jumlahDiteruskan);
 }
 
-void tampilkanPaket(const Paket &p, int rssi) {
-  Serial.printf("DITERIMA: dari node %d, lastHop %d, seq %u, RSSI %d dBm\n",
-                p.sourceID, p.lastHopID, p.seq, rssi);
+void tampilkanPaket(const Paket &p, int rssi, float snr) {
+  Serial.printf("DITERIMA: dari node %d, lastHop %d, seq %u, RSSI %d dBm, SNR %.2f dB\n",
+                p.sourceID, p.lastHopID, p.seq, rssi, snr);
   Serial.printf("  POSISI %.6f, %.6f (%s)\n",
                 p.lat, p.lon, namaKualitas(p.kualitas));
   Serial.printf("  PESAN  \"%s\"\n", p.teks.c_str());

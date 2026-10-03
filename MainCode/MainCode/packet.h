@@ -7,7 +7,7 @@
 // ============================================================
 // Format paket CSV:
 //
-//   sourceID,lastHopID,seq,tipe,lat,lon,flag,teks
+//   sourceID,lastHopID,seq,tipe,lat,lon,flag,hops,teks
 //
 // sourceID  = node yang MEMBUAT paket, tidak pernah berubah
 // lastHopID = node yang TERAKHIR menyiarkan, diubah tiap kali diteruskan
@@ -20,13 +20,25 @@
 //             tanpa mengubah susunan field yang sudah ada.
 // lat, lon  = posisi pengirim, 0.000000 kalau tidak punya/belum fix
 // flag      = kualitas posisi: FIX, STALE, atau NOFIX
+// hops      = kualitas sinyal tiap hop yang sudah dilalui, berurutan,
+//             dipisah ';'. Satu entri = penerima:rssi:snr, ditambahkan
+//             oleh node yang MENERIMA hop itu. Pembuat paket mengirimnya
+//             kosong, tiap relay menambahkan satu entri sebelum
+//             meneruskan, dan penerima akhir menambahkan entri hop
+//             terakhir sendiri saat mencatat (tidak disiarkan lagi).
+//             Pengirim tiap hop = penerima entri sebelumnya, atau
+//             sourceID untuk entri pertama.
 // teks      = isi pesan, bentuknya bebas
 //
 // Contoh:
-//   1,1,17,PESAN,-6.365432,106.824512,FIX,siaran #17, 7 satelit, FIX
-//   1,2,17,PESAN,-6.365432,106.824512,FIX,siaran #17, 7 satelit, FIX
-//     (baris kedua = paket yang sama setelah diteruskan relay id 2)
-//   0,0,4,PESAN,0.000000,0.000000,NOFIX,segera kembali ke titik kumpul
+//   1,1,17,PESAN,-6.365432,106.824512,FIX,,siaran #17, 7 satelit, FIX
+//   1,2,17,PESAN,-6.365432,106.824512,FIX,2:-67:8.25,siaran #17, 7 satelit, FIX
+//     (baris kedua = paket yang sama setelah diteruskan relay id 2, yang
+//      menerimanya dari field dengan RSSI -67 dBm dan SNR 8.25 dB)
+//   0,0,4,PESAN,0.000000,0.000000,NOFIX,,segera kembali ke titik kumpul
+//
+// Saat dicatat command, hops paket di atas menjadi lengkap, misalnya
+//   2:-67:8.25;0:-41:9.50   = field->relay -67/8.25, relay->command -41/9.50
 //
 // Payload teks sengaja ditaruh PALING AKHIR supaya boleh mengandung
 // koma tanpa merusak pemisahan field.
@@ -58,6 +70,9 @@ struct Paket {
   float          lat;
   float          lon;
   KualitasPosisi kualitas;
+
+  // Daftar penerima:rssi:snr per hop, apa adanya dari paket.
+  String hops;
 
   String teks;
 };
@@ -100,7 +115,8 @@ inline String buatPaketPesan(uint8_t sourceID,
   p += String(lon, 6);
   p += ',';
   p += namaKualitas(kualitas);
-  p += ',';
+  // hops kosong: paket baru belum melewati hop mana pun.
+  p += ",,";
   p += teks;
   return p;
 }
@@ -128,11 +144,12 @@ inline bool parsePaket(const String &raw, Paket &p) {
     return false;
   }
 
-  // isi = lat,lon,flag,teks
+  // isi = lat,lon,flag,hops,teks
   int m1 = isi.indexOf(',');
   int m2 = isi.indexOf(',', m1 + 1);
   int m3 = isi.indexOf(',', m2 + 1);
-  if (m1 < 0 || m2 < 0 || m3 < 0) {
+  int m4 = isi.indexOf(',', m3 + 1);
+  if (m1 < 0 || m2 < 0 || m3 < 0 || m4 < 0) {
     p.tipe = TIPE_TIDAKVALID;
     return false;
   }
@@ -145,22 +162,51 @@ inline bool parsePaket(const String &raw, Paket &p) {
   else if (f == "STALE") p.kualitas = POS_STALE;
   else                   p.kualitas = POS_NOFIX;
 
+  p.hops = isi.substring(m3 + 1, m4);
+
   // Sisa baris apa adanya, termasuk koma yang ada di dalamnya.
-  p.teks = isi.substring(m3 + 1);
+  p.teks = isi.substring(m4 + 1);
 
   p.tipe = TIPE_PESAN;
   return true;
 }
 
-// Ganti field lastHopID tanpa membongkar seluruh paket, sehingga
-// payload teks tetap utuh apa adanya termasuk komanya.
-inline String gantiLastHop(const String &raw, uint8_t idBaru) {
-  int k1 = raw.indexOf(',');
-  int k2 = raw.indexOf(',', k1 + 1);
-  if (k1 < 0 || k2 < 0) {
+// Nomor kolom (mulai 0) yang diubah relay. Semuanya terletak sebelum
+// kolom teks, jadi koma di dalam teks tidak ikut terhitung.
+#define KOLOM_LASTHOP    1
+#define KOLOM_HOPS       7
+
+// Ganti isi satu kolom tanpa membongkar seluruh paket, sehingga kolom
+// lain, terutama teks dan koordinat, diteruskan persis seperti dikirim
+// pembuatnya (tidak melewati konversi float bolak-balik).
+inline String gantiKolom(const String &raw, int kolom, const String &nilai) {
+  int awal = 0;
+  for (int i = 0; i < kolom; i++) {
+    awal = raw.indexOf(',', awal) + 1;
+    if (awal == 0) {
+      return raw;
+    }
+  }
+  int akhir = raw.indexOf(',', awal);
+  if (akhir < 0) {
     return raw;
   }
-  return raw.substring(0, k1 + 1) + String(idBaru) + raw.substring(k2);
+  return raw.substring(0, awal) + nilai + raw.substring(akhir);
+}
+
+// Daftar hops ditambah satu entri penerima:rssi:snr. Dipakai relay
+// sebelum meneruskan dan command saat mencatat hop terakhir.
+inline String tambahHop(const String &hops, uint8_t penerima, int rssi, float snr) {
+  String entri = String(penerima) + ':' + String(rssi) + ':' + String(snr, 2);
+  return hops.length() == 0 ? entri : hops + ';' + entri;
+}
+
+// Bentuk paket yang disiarkan ulang relay: lastHopID diganti id relay,
+// dan ukuran hop yang baru diterima relay ditambahkan ke hops.
+inline String buatPaketTerusan(const String &raw, const Paket &p,
+                               uint8_t idRelay, int rssi, float snr) {
+  String hasil = gantiKolom(raw, KOLOM_LASTHOP, String(idRelay));
+  return gantiKolom(hasil, KOLOM_HOPS, tambahHop(p.hops, idRelay, rssi, snr));
 }
 
 inline bool nodeDikenal(uint8_t id) {

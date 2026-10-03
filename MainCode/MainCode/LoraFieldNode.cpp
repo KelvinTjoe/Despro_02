@@ -262,7 +262,8 @@ void terimaPaket() {
     return;
   }
 
-  int rssi = LoRa.packetRssi();
+  int   rssi = LoRa.packetRssi();
+  float snr  = LoRa.packetSnr();
 
   String raw;
   while (LoRa.available()) {
@@ -282,8 +283,9 @@ void terimaPaket() {
     return;
   }
 
-  Serial.printf("DITERIMA: dari node %d, seq %u, RSSI %d dBm\n",
-                p.sourceID, p.seq, rssi);
+  Serial.printf("DITERIMA: dari node %d, lastHop %d, seq %u, RSSI %d dBm, SNR %.2f dB\n",
+                p.sourceID, p.lastHopID, p.seq, rssi, snr);
+  Serial.printf("  HOPS   %s\n", tambahHop(p.hops, NODE_ID, rssi, snr).c_str());
   Serial.printf("  POSISI %.6f, %.6f (%s)\n",
                 p.lat, p.lon, namaKualitas(p.kualitas));
   Serial.printf("  PESAN  \"%s\"\n", p.teks.c_str());

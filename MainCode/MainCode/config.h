@@ -25,6 +25,19 @@
 // Permen Komdigi No. 2/2025). Turunkan sebelum pengujian di luar lab.
 #define LORA_TX_POWER   17
 
+// Clock SPI ke modul LoRa. Library memakai 8 MHz secara bawaan, dan di
+// atas breadboard dengan kabel dupont panjang kecepatan itu kerap
+// menghasilkan pembacaan register yang salah. Register IRQ yang salah
+// baca itulah yang memunculkan "paket hantu" ribuan kali saat debugging.
+#define LORA_SPI_FREQ   2E6
+
+// Batas byte yang dibaca dari FIFO radio dalam satu paket. Paket terpanjang
+// yang mungkin dikirim sistem ini sekitar 200 byte, jadi 250 sudah longgar.
+// Gunanya bukan menghemat memori melainkan mencegah board menggantung:
+// kalau modul melaporkan panjang paket yang ngawur, loop pembacaan bisa
+// tidak pernah berhenti dan board tampak mati padahal terjebak di sana.
+#define BATAS_BACA_FIFO 250
+
 // ---- GPS NEO-6M (UART2) ----
 #define GPS_RX          16
 #define GPS_TX          17
@@ -73,7 +86,7 @@
 #define JALUR_BEBAS        1
 #define JALUR_WAJIB_RELAY  2
 
-#define MODE_JALUR      JALUR_WAJIB_RELAY
+#define MODE_JALUR      JALUR_WAJIB_RELAY  // ubah di sini untuk uji jalur berbeda
 
 // Whitelist: paket dari sourceID di luar daftar ini diabaikan,
 // untuk menolak gangguan dari radio 433 MHz lain di sekitar.
