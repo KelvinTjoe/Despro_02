@@ -13,7 +13,7 @@
 #define LORA_RST        14
 #define LORA_DIO0       26
 
-#define LORA_FREQ       433E6
+#define LORA_FREQ       433.175E6
 
 // Parameter radio. SEMUA node wajib memakai nilai yang sama persis,
 // kalau beda satu saja paket tidak akan pernah terbaca.
@@ -23,7 +23,7 @@
 
 // 17 dBm melebihi batas legal EIRP 433 MHz di Indonesia (12,15 dBm,
 // Permen Komdigi No. 2/2025). Turunkan sebelum pengujian di luar lab.
-#define LORA_TX_POWER   17
+#define LORA_TX_POWER   9
 
 // Clock SPI ke modul LoRa. Library memakai 8 MHz secara bawaan, dan di
 // atas breadboard dengan kabel dupont panjang kecepatan itu kerap
